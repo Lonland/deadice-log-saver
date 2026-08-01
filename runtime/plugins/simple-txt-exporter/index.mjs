@@ -114,9 +114,36 @@ function isSystemMessage(message) {
   return elements.every((element) => element?.grayTipElement || Number(element?.elementType) === 8);
 }
 
-function renderTxt(group, messages) {
+function hasImageContent(message) {
+  return (message?.elements || []).some((element) => !!element?.picElement);
+}
+
+function hasFileContent(message) {
+  return (message?.elements || []).some((element) => !!element?.fileElement);
+}
+
+function normalizeFilters(options = {}) {
+  return {
+    removeSystem: options.removeSystem !== false,
+    removeImage: options.removeImage === true,
+    removeFile: options.removeFile === true
+  };
+}
+
+function shouldKeepMessage(message, filters) {
+  if (filters.removeSystem && isSystemMessage(message)) return false;
+  if (filters.removeImage && hasImageContent(message)) return false;
+  if (filters.removeFile && hasFileContent(message)) return false;
+  return true;
+}
+
+function filterExportMessages(messages, filters) {
+  return messages.filter((message) => shouldKeepMessage(message, filters));
+}
+
+function renderTxt(group, messages, filters = normalizeFilters()) {
   const lines = [];
-  const visibleMessages = messages.filter((message) => !isSystemMessage(message));
+  const visibleMessages = filterExportMessages(messages, filters);
 
   for (const message of visibleMessages) {
     const id = senderId(message);
@@ -130,13 +157,12 @@ function renderTxt(group, messages) {
   return lines.join('\n').trimEnd() + '\n';
 }
 
-function countVisibleMessages(messages) {
-  return messages.filter((message) => !isSystemMessage(message)).length;
+function countVisibleMessages(messages, filters = normalizeFilters()) {
+  return filterExportMessages(messages, filters).length;
 }
 
-function excelRows(messages, includeGroupCode = false) {
-  return messages
-    .filter((message) => !isSystemMessage(message))
+function excelRows(messages, includeGroupCode = false, filters = normalizeFilters()) {
+  return filterExportMessages(messages, filters)
     .map((message) => {
       const row = [
         formatDateTime(msgTimeMillis(message)),
@@ -288,8 +314,8 @@ function createZip(entries) {
   return Buffer.concat([...localParts, centralDir, end]);
 }
 
-function renderXlsx(messages, includeGroupCode = false) {
-  const rows = excelRows(messages, includeGroupCode);
+function renderXlsx(messages, includeGroupCode = false, filters = normalizeFilters()) {
+  const rows = excelRows(messages, includeGroupCode, filters);
   return createZip([
     {
       name: '[Content_Types].xml',
@@ -441,12 +467,15 @@ function htmlPage() {
     section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 20px; }
     label { display: block; font-size: 14px; font-weight: 650; margin: 14px 0 6px; }
     select, input { width: 100%; box-sizing: border-box; border: 1px solid #c9ced8; border-radius: 6px; padding: 10px 12px; font-size: 15px; background: #fff; }
+    input[type="checkbox"] { width: auto; margin: 0 8px 0 0; }
+    .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin-top: 8px; }
+    .filters label { display: flex; align-items: center; margin: 0; font-weight: 500; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
     button { margin-top: 18px; border: 0; border-radius: 6px; background: #1f6feb; color: white; padding: 11px 16px; font-size: 15px; cursor: pointer; }
     button:disabled { background: #9aa4b2; cursor: wait; }
     #status { margin-top: 14px; white-space: pre-wrap; line-height: 1.5; }
     a { color: #1f6feb; }
-    @media (max-width: 620px) { .row { grid-template-columns: 1fr; } main { padding: 22px 14px; } }
+    @media (max-width: 620px) { .row, .filters { grid-template-columns: 1fr; } main { padding: 22px 14px; } }
   </style>
 </head>
 <body>
@@ -482,6 +511,12 @@ function htmlPage() {
         <option value="txt">TXT</option>
         <option value="xlsx">Excel（.xlsx）</option>
       </select>
+      <label>过滤选项</label>
+      <div class="filters">
+        <label><input id="removeSystem" type="checkbox" checked>去除系统记录</label>
+        <label><input id="removeImage" type="checkbox">去除图片记录</label>
+        <label><input id="removeFile" type="checkbox">去除文件记录</label>
+      </div>
       <button id="export">导出</button>
       <div id="status"></div>
     </section>
@@ -575,7 +610,10 @@ function htmlPage() {
             endTime: document.getElementById('end').value,
             maxMessages: document.getElementById('limit').value,
             batchSize: document.getElementById('batch').value,
-            format: document.getElementById('format').value
+            format: document.getElementById('format').value,
+            removeSystem: document.getElementById('removeSystem').checked,
+            removeImage: document.getElementById('removeImage').checked,
+            removeFile: document.getElementById('removeFile').checked
           })
         });
         statusEl.innerHTML = '导出完成：' + data.messageCount + ' 条消息<br><a href="' + data.downloadUrl + '">打开导出文件</a><br>保存位置：' + data.filePath;
@@ -619,10 +657,11 @@ async function startServer(core, logger) {
       const groups = await listGroups(core);
       const messages = await fetchMergedGroupMessages(core, groupCodes, groups, req.body || {});
       const format = req.body?.format === 'xlsx' ? 'xlsx' : 'txt';
+      const filters = normalizeFilters(req.body || {});
       const isMultiGroup = groupCodes.length > 1;
       const content = format === 'xlsx'
-        ? renderXlsx(messages, isMultiGroup)
-        : renderTxt({ groupCode: groupCodes.join('_'), name: isMultiGroup ? '多群合并' : `群聊 ${groupCodes[0]}` }, messages);
+        ? renderXlsx(messages, isMultiGroup, filters)
+        : renderTxt({ groupCode: groupCodes.join('_'), name: isMultiGroup ? '多群合并' : `群聊 ${groupCodes[0]}` }, messages, filters);
       await fs.mkdir(EXPORT_ROOT, { recursive: true });
 
       const exportName = isMultiGroup ? `多群合并_${groupCodes.length}群` : `${safeFileName((groups.find((item) => item.groupCode === groupCodes[0]) || {}).name || '群聊')}_${groupCodes[0]}`;
@@ -633,10 +672,10 @@ async function startServer(core, logger) {
       res.json({
         success: true,
         data: {
-          messageCount: countVisibleMessages(messages),
+          messageCount: countVisibleMessages(messages, filters),
           fileName,
           filePath,
-          downloadUrl: `/api/download/${encodeURIComponent(fileName)}`
+          downloadUrl: `/api/download?file=${encodeURIComponent(fileName)}`
         }
       });
     } catch (error) {
@@ -645,10 +684,38 @@ async function startServer(core, logger) {
     }
   });
 
-  app.get('/api/download/:fileName', async (req, res) => {
-    const fileName = path.basename(req.params.fileName);
-    res.download(path.join(EXPORT_ROOT, fileName));
-  });
+  async function handleDownload(req, res) {
+    try {
+      const rawFileName = String(req.query.file || req.params.fileName || '');
+      const fileName = path.basename(rawFileName);
+      if (!fileName) {
+        return res.status(400).type('text/plain').send('Missing file name. Please export again from the page.');
+      }
+
+      const exportRoot = path.resolve(EXPORT_ROOT);
+      const targetPath = path.resolve(exportRoot, fileName);
+      if (targetPath !== exportRoot && !targetPath.startsWith(exportRoot + path.sep)) {
+        return res.status(400).type('text/plain').send('Invalid file name.');
+      }
+
+      try {
+        await fs.access(targetPath);
+      } catch {
+        return res.status(404).type('text/plain').send(`Export file not found: ${fileName}\nPlease export again from the page.`);
+      }
+
+      res.download(targetPath, fileName, (error) => {
+        if (error && !res.headersSent) {
+          res.status(500).type('text/plain').send(`Download failed: ${error.message || error}`);
+        }
+      });
+    } catch (error) {
+      res.status(500).type('text/plain').send(`Download failed: ${error?.message || error}`);
+    }
+  }
+
+  app.get('/api/download', handleDownload);
+  app.get('/api/download/:fileName', handleDownload);
 
   server = createServer(app);
   await new Promise((resolve, reject) => {
@@ -680,3 +747,5 @@ export async function plugin_cleanup() {
   server = null;
   coreRef = null;
 }
+
+
