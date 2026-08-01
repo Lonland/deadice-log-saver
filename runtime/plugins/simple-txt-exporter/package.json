@@ -1,0 +1,18 @@
+{
+  "name": "simple-txt-exporter",
+  "plugin": "轻量 TXT 群聊导出",
+  "version": "0.1.0",
+  "description": "A small NapCat plugin for exporting QQ group chat history to plain TXT.",
+  "main": "index.mjs",
+  "type": "module",
+  "napcat": {
+    "tags": ["工具"],
+    "minVersion": "4.14.0"
+  },
+  "dependencies": {
+    "express": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
