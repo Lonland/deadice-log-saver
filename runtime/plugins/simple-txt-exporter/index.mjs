@@ -140,7 +140,15 @@ function hasFileContent(message) {
 }
 
 function normalizeFilters(options = {}) {
-  const logMode = ['all', 'inside', 'outside'].includes(options.logMode) ? options.logMode : 'all';
+  const modeAliases = {
+    all: 'all',
+    inside: 'inside_no_paren',
+    outside: 'outside_all',
+    inside_all: 'inside_all',
+    inside_no_paren: 'inside_no_paren',
+    outside_all: 'outside_all'
+  };
+  const logMode = modeAliases[options.logMode] || 'all';
   return {
     removeSystem: options.removeSystem !== false,
     removeImage: options.removeImage === true,
@@ -164,6 +172,11 @@ function getLogCommand(message) {
   return '';
 }
 
+function isOutOfCharacterText(message) {
+  const text = messageText(message).trimStart();
+  return text.startsWith('(') || text.startsWith('（');
+}
+
 function annotateLogScenes(messages) {
   let inside = false;
   const annotated = [];
@@ -179,7 +192,13 @@ function annotateLogScenes(messages) {
       continue;
     }
 
-    annotated.push({ ...message, __logScene: inside ? 'inside' : 'outside' });
+    const isOoc = inside && isOutOfCharacterText(message);
+    annotated.push({
+      ...message,
+      __logInsideSegment: inside,
+      __logOocByParen: isOoc,
+      __logScene: inside && !isOoc ? 'inside' : 'outside'
+    });
   }
 
   return annotated;
@@ -189,8 +208,9 @@ function shouldKeepMessage(message, filters) {
   if (filters.removeSystem && isSystemMessage(message)) return false;
   if (filters.removeImage && hasImageContent(message)) return false;
   if (filters.removeFile && hasFileContent(message)) return false;
-  if (filters.logMode === 'inside' && message.__logScene !== 'inside') return false;
-  if (filters.logMode === 'outside' && message.__logScene !== 'outside') return false;
+  if (filters.logMode === 'inside_all' && !message.__logInsideSegment) return false;
+  if (filters.logMode === 'inside_no_paren' && message.__logScene !== 'inside') return false;
+  if (filters.logMode === 'outside_all' && message.__logScene !== 'outside') return false;
   return true;
 }
 
@@ -572,9 +592,10 @@ function htmlPage() {
       <input id="outputDir" type="text" value="${htmlAttr(DEFAULT_EXPORT_ROOT)}">
       <label>场景范围</label>
       <div class="filters">
-        <label><input name="logMode" type="radio" value="all" checked>全部记录</label>
-        <label><input name="logMode" type="radio" value="inside">仅场内记录</label>
-        <label><input name="logMode" type="radio" value="outside">仅场外记录</label>
+        <label><input name="logMode" type="radio" value="all" checked>全部消息</label>
+        <label><input name="logMode" type="radio" value="inside_all">全部场内</label>
+        <label><input name="logMode" type="radio" value="inside_no_paren">场内无括号消息</label>
+        <label><input name="logMode" type="radio" value="outside_all">全部场外</label>
       </div>
       <label>过滤选项</label>
       <div class="filters">
@@ -835,6 +856,7 @@ export async function plugin_cleanup() {
   server = null;
   coreRef = null;
 }
+
 
 
 
