@@ -14,6 +14,8 @@
 3. 在项目根目录运行 `napiLoader.bat`。
 4. QQ 登录完成后访问 <http://localhost:40777/>。
 
+如果 QQ 退出或被挤下线，页面会自动提示登录失效；同时会清理 `~/.qq-chat-exporter/security.json`、同目录下的 `.jsonl` 记录，以及 `config/webui.json`、按账号命名的 `napcat_*.json` / `onebot11_*.json` 配置。
+
 ## TXT 格式
 
 默认每条消息导出为：

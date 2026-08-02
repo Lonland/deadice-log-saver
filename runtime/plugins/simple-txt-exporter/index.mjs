@@ -1,6 +1,6 @@
 import express from 'express';
 import { createServer } from 'http';
-import { promises as fs } from 'fs';
+import { promises as fs, readdirSync, unlinkSync } from 'fs';
 import path from 'path';
 
 const PORT = Number(process.env.SIMPLE_TXT_EXPORTER_PORT || 40777);
@@ -10,9 +10,18 @@ const MAX_BATCH_SIZE = 5000;
 const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
 const DEFAULT_EXPORT_ROOT = path.join(USER_HOME, 'Downloads', 'QQ跑团Log导出器');
 const LEGACY_EXPORT_ROOT = path.join(USER_HOME, '.simple-txt-exporter', 'exports');
+const QQ_CHAT_EXPORTER_DIR = path.join(USER_HOME, '.qq-chat-exporter');
 
 let server = null;
 let coreRef = null;
+let cleanupHooksRegistered = false;
+let sensitiveArtifactsCleaned = false;
+let loginStatusState = {
+  isOnline: false,
+  isInvalid: false,
+  label: '未知',
+  detail: ''
+};
 const exportedFiles = new Map();
 
 function createLogger(core) {
@@ -26,6 +35,176 @@ function createLogger(core) {
 
 function normalizeCore(rawCore) {
   return rawCore;
+}
+
+function updateLoginStatus(patch) {
+  loginStatusState = {
+    ...loginStatusState,
+    ...patch
+  };
+}
+
+function getRuntimeConfigDir() {
+  return coreRef?.context?.pathWrapper?.configPath || '';
+}
+
+function isSensitiveUserArtifact(fileName) {
+  return fileName === 'security.json' || fileName.endsWith('.jsonl');
+}
+
+function isSensitiveRuntimeArtifact(fileName) {
+  return fileName === 'webui.json' || /^napcat_.*\.json$/i.test(fileName) || /^onebot11_.*\.json$/i.test(fileName);
+}
+
+function collectSensitiveArtifacts() {
+  const targets = new Set();
+
+  try {
+    for (const fileName of readdirSync(QQ_CHAT_EXPORTER_DIR)) {
+      if (isSensitiveUserArtifact(fileName)) {
+        targets.add(path.join(QQ_CHAT_EXPORTER_DIR, fileName));
+      }
+    }
+  } catch {
+    // Ignore missing or unreadable user data folders.
+  }
+
+  const runtimeConfigDir = getRuntimeConfigDir();
+  if (runtimeConfigDir) {
+    try {
+      for (const fileName of readdirSync(runtimeConfigDir)) {
+        if (isSensitiveRuntimeArtifact(fileName)) {
+          targets.add(path.join(runtimeConfigDir, fileName));
+        }
+      }
+    } catch {
+      // Ignore missing or unreadable runtime config folders.
+    }
+  }
+
+  return [...targets];
+}
+
+async function removeSensitiveArtifacts(logger) {
+  if (sensitiveArtifactsCleaned) return [];
+
+  const removed = [];
+  for (const filePath of collectSensitiveArtifacts()) {
+    try {
+      await fs.unlink(filePath);
+      removed.push(filePath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        logger?.warn?.(`清理敏感文件失败: ${filePath}`, error);
+      }
+    }
+  }
+
+  sensitiveArtifactsCleaned = true;
+  return removed;
+}
+
+function removeSensitiveArtifactsSync() {
+  if (sensitiveArtifactsCleaned) return;
+
+  for (const filePath of collectSensitiveArtifacts()) {
+    try {
+      unlinkSync(filePath);
+    } catch {
+      // Ignore missing or locked files during shutdown.
+    }
+  }
+
+  sensitiveArtifactsCleaned = true;
+}
+
+function registerCleanupHooks() {
+  if (cleanupHooksRegistered) return;
+  cleanupHooksRegistered = true;
+
+  process.once('exit', () => {
+    removeSensitiveArtifactsSync();
+  });
+
+  const cleanupAndExit = (code) => {
+    removeSensitiveArtifactsSync();
+    process.exit(code);
+  };
+
+  process.once('SIGINT', () => cleanupAndExit(130));
+  process.once('SIGTERM', () => cleanupAndExit(143));
+}
+
+function registerLoginStatusListeners(core, logger) {
+  const session = core?.context?.session;
+  const loginService = session?.getLoginService?.();
+  const profileService = session?.getProfileService?.();
+  const msgService = session?.getMsgService?.();
+
+  if (!loginService && !profileService && !msgService) {
+    return;
+  }
+
+  const loginListener = {
+    onLoginConnected: () => {
+      updateLoginStatus({ label: '登录服务已连接', detail: '' });
+    },
+    onLoginDisConnected: () => {
+      updateLoginStatus({ isOnline: false, isInvalid: true, label: '登录连接已断开', detail: '当前账号可能已失效或网络已断开' });
+    },
+    onLogoutSucceed: () => {
+      updateLoginStatus({ isOnline: false, isInvalid: true, label: '已退出登录', detail: 'QQ 已退出登录' });
+    },
+    onLogoutFailed: () => {
+      updateLoginStatus({ label: '退出登录失败', detail: '退出动作未完成' });
+    },
+    onUserLoggedIn: (userId) => {
+      updateLoginStatus({ label: `账号 ${userId} 已登录`, detail: '' });
+    }
+  };
+
+  const profileListener = {
+    onSelfStatusChanged: (info) => {
+      if (info?.status === 20) {
+        updateLoginStatus({ isOnline: false, isInvalid: true, label: '账号已离线', detail: '当前登录已失效或被挤下线' });
+      } else {
+        updateLoginStatus({ isOnline: true, isInvalid: false, label: '账号在线', detail: '' });
+      }
+    }
+  };
+
+  const msgListener = {
+    onKickedOffLine: (info) => {
+      const title = info?.tipsTitle || '账号被挤下线';
+      const desc = info?.tipsDesc || '当前登录已失效';
+      updateLoginStatus({ isOnline: false, isInvalid: true, label: title, detail: desc });
+    }
+  };
+
+  try {
+    loginService?.addKernelLoginListener?.(loginListener);
+  } catch (error) {
+    logger?.warn?.('注册登录状态监听失败', error);
+  }
+
+  try {
+    profileService?.addKernelProfileListener?.(profileListener);
+  } catch (error) {
+    logger?.warn?.('注册资料状态监听失败', error);
+  }
+
+  try {
+    msgService?.addKernelMsgListener?.(msgListener);
+  } catch (error) {
+    logger?.warn?.('注册消息状态监听失败', error);
+  }
+
+  updateLoginStatus({
+    isOnline: !!core?.selfInfo?.online,
+    isInvalid: !core?.selfInfo?.online,
+    label: core?.selfInfo?.online ? '账号在线' : '账号离线',
+    detail: core?.selfInfo?.online ? '' : '如果刚退出或被挤下线，页面会提示登录失效'
+  });
 }
 
 function normalizePluginArgs(arg0, arg1, arg2, arg3) {
@@ -616,6 +795,8 @@ function htmlPage() {
         <label><input id="removeImage" type="checkbox">去除图片记录</label>
         <label><input id="removeFile" type="checkbox">去除文件记录</label>
       </div>
+      <label>登录状态</label>
+      <div id="loginState" style="padding:10px 12px;border:1px solid #dfe3ea;border-radius:6px;background:#f8fafc;line-height:1.5;">正在获取状态...</div>
       <button id="export">导出</button>
       <div id="status"></div>
     </section>
@@ -625,6 +806,7 @@ function htmlPage() {
     const groupSearchEl = document.getElementById('groupSearch');
     const statusEl = document.getElementById('status');
     const buttonEl = document.getElementById('export');
+    const loginStateEl = document.getElementById('loginState');
     let allGroups = [];
 
     async function api(path, options) {
@@ -632,6 +814,24 @@ function htmlPage() {
       const body = await res.json();
       if (!res.ok || !body.success) throw new Error(body.error || '请求失败');
       return body.data;
+    }
+
+    function renderLoginState(state) {
+      if (!state) {
+        loginStateEl.textContent = '状态未知';
+        return;
+      }
+      const statusText = state.isOnline ? '在线' : (state.isInvalid ? '登录失效 / 已离线' : '离线');
+      const detailText = state.detail ? '<br>' + state.detail : '';
+      loginStateEl.innerHTML = '<strong>' + statusText + '</strong><br>' + state.label + detailText;
+    }
+
+    async function refreshLoginState() {
+      try {
+        renderLoginState(await api('/api/status'));
+      } catch (error) {
+        loginStateEl.textContent = '状态读取失败：' + error.message;
+      }
     }
 
     function groupLabel(group) {
@@ -725,6 +925,8 @@ function htmlPage() {
       }
     });
 
+    refreshLoginState();
+    setInterval(refreshLoginState, 5000);
     loadGroups();
   </script>
 </body>
@@ -746,6 +948,13 @@ async function startServer(core, logger) {
       logger.error('读取群列表失败:', error);
       res.status(500).json({ success: false, error: error?.message || String(error) });
     }
+  });
+
+  app.get('/api/status', (_req, res) => {
+    res.json({
+      success: true,
+      data: loginStatusState
+    });
   });
 
   app.post('/api/export', async (req, res) => {
@@ -856,6 +1065,8 @@ export async function plugin_init(arg0, arg1, arg2, arg3) {
 
   coreRef = normalizeCore(core);
   const logger = createLogger(coreRef);
+  registerCleanupHooks();
+  registerLoginStatusListeners(coreRef, logger);
   try {
     await startServer(coreRef, logger);
   } catch (error) {
@@ -864,9 +1075,12 @@ export async function plugin_init(arg0, arg1, arg2, arg3) {
 }
 
 export async function plugin_cleanup() {
-  if (!server) return;
-  await new Promise((resolve) => server.close(resolve));
-  server = null;
+  const logger = createLogger(coreRef);
+  if (server) {
+    await new Promise((resolve) => server.close(resolve));
+    server = null;
+  }
+  await removeSensitiveArtifacts(logger);
   coreRef = null;
 }
 
