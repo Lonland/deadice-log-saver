@@ -7,14 +7,13 @@ const PORT = Number(process.env.SIMPLE_TXT_EXPORTER_PORT || 40777);
 const GROUP_CHAT_TYPE = 2;
 const DEFAULT_BATCH_SIZE = 1000;
 const MAX_BATCH_SIZE = 5000;
-const EXPORT_ROOT = path.join(
-  process.env.USERPROFILE || process.env.HOME || process.cwd(),
-  '.simple-txt-exporter',
-  'exports'
-);
+const USER_HOME = process.env.USERPROFILE || process.env.HOME || process.cwd();
+const DEFAULT_EXPORT_ROOT = path.join(USER_HOME, 'Downloads', 'QQ跑团Log导出器');
+const LEGACY_EXPORT_ROOT = path.join(USER_HOME, '.simple-txt-exporter', 'exports');
 
 let server = null;
 let coreRef = null;
+const exportedFiles = new Map();
 
 function createLogger(core) {
   const logger = core?.context?.logger;
@@ -38,6 +37,24 @@ function normalizePluginArgs(arg0, arg1, arg2, arg3) {
     actions: ctx.actions || nested.actions || arg2,
     instance: ctx.instance || nested.instance || arg3
   };
+}
+
+function htmlAttr(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+function resolveOutputDir(input) {
+  const raw = String(input || '').trim();
+  if (!raw) return DEFAULT_EXPORT_ROOT;
+  return path.resolve(raw.replace(/^~(?=$|[\\/])/, USER_HOME));
+}
+
+function createDownloadId() {
+  return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
 function safeFileName(input) {
@@ -123,22 +140,62 @@ function hasFileContent(message) {
 }
 
 function normalizeFilters(options = {}) {
+  const logMode = ['all', 'inside', 'outside'].includes(options.logMode) ? options.logMode : 'all';
   return {
     removeSystem: options.removeSystem !== false,
     removeImage: options.removeImage === true,
-    removeFile: options.removeFile === true
+    removeFile: options.removeFile === true,
+    logMode
   };
+}
+
+function normalizeLogCommandText(text) {
+  return String(text || '')
+    .trim()
+    .replace(/^。/, '.')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+function getLogCommand(message) {
+  const text = normalizeLogCommandText(messageText(message));
+  if (text === '.log new' || text === '.log on') return 'start';
+  if (text === '.log end' || text === '.log off') return 'end';
+  return '';
+}
+
+function annotateLogScenes(messages) {
+  let inside = false;
+  const annotated = [];
+
+  for (const message of messages) {
+    const command = getLogCommand(message);
+    if (command === 'start') {
+      if (!inside) inside = true;
+      continue;
+    }
+    if (command === 'end') {
+      if (inside) inside = false;
+      continue;
+    }
+
+    annotated.push({ ...message, __logScene: inside ? 'inside' : 'outside' });
+  }
+
+  return annotated;
 }
 
 function shouldKeepMessage(message, filters) {
   if (filters.removeSystem && isSystemMessage(message)) return false;
   if (filters.removeImage && hasImageContent(message)) return false;
   if (filters.removeFile && hasFileContent(message)) return false;
+  if (filters.logMode === 'inside' && message.__logScene !== 'inside') return false;
+  if (filters.logMode === 'outside' && message.__logScene !== 'outside') return false;
   return true;
 }
 
 function filterExportMessages(messages, filters) {
-  return messages.filter((message) => shouldKeepMessage(message, filters));
+  return annotateLogScenes(messages).filter((message) => shouldKeepMessage(message, filters));
 }
 
 function renderTxt(group, messages, filters = normalizeFilters()) {
@@ -467,7 +524,7 @@ function htmlPage() {
     section { background: #fff; border: 1px solid #dfe3ea; border-radius: 8px; padding: 20px; }
     label { display: block; font-size: 14px; font-weight: 650; margin: 14px 0 6px; }
     select, input { width: 100%; box-sizing: border-box; border: 1px solid #c9ced8; border-radius: 6px; padding: 10px 12px; font-size: 15px; background: #fff; }
-    input[type="checkbox"] { width: auto; margin: 0 8px 0 0; }
+    input[type="checkbox"], input[type="radio"] { width: auto; margin: 0 8px 0 0; }
     .filters { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px 14px; margin-top: 8px; }
     .filters label { display: flex; align-items: center; margin: 0; font-weight: 500; }
     .row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -511,6 +568,14 @@ function htmlPage() {
         <option value="txt">TXT</option>
         <option value="xlsx">Excel（.xlsx）</option>
       </select>
+      <label for="outputDir">保存位置</label>
+      <input id="outputDir" type="text" value="${htmlAttr(DEFAULT_EXPORT_ROOT)}">
+      <label>场景范围</label>
+      <div class="filters">
+        <label><input name="logMode" type="radio" value="all" checked>全部记录</label>
+        <label><input name="logMode" type="radio" value="inside">仅场内记录</label>
+        <label><input name="logMode" type="radio" value="outside">仅场外记录</label>
+      </div>
       <label>过滤选项</label>
       <div class="filters">
         <label><input id="removeSystem" type="checkbox" checked>去除系统记录</label>
@@ -611,6 +676,8 @@ function htmlPage() {
             maxMessages: document.getElementById('limit').value,
             batchSize: document.getElementById('batch').value,
             format: document.getElementById('format').value,
+            outputDir: document.getElementById('outputDir').value,
+            logMode: document.querySelector('input[name="logMode"]:checked').value,
             removeSystem: document.getElementById('removeSystem').checked,
             removeImage: document.getElementById('removeImage').checked,
             removeFile: document.getElementById('removeFile').checked
@@ -662,12 +729,15 @@ async function startServer(core, logger) {
       const content = format === 'xlsx'
         ? renderXlsx(messages, isMultiGroup, filters)
         : renderTxt({ groupCode: groupCodes.join('_'), name: isMultiGroup ? '多群合并' : `群聊 ${groupCodes[0]}` }, messages, filters);
-      await fs.mkdir(EXPORT_ROOT, { recursive: true });
+      const outputDir = resolveOutputDir(req.body?.outputDir);
+      await fs.mkdir(outputDir, { recursive: true });
 
       const exportName = isMultiGroup ? `多群合并_${groupCodes.length}群` : `${safeFileName((groups.find((item) => item.groupCode === groupCodes[0]) || {}).name || '群聊')}_${groupCodes[0]}`;
       const fileName = `${safeFileName(exportName)}_${Date.now()}.${format}`;
-      const filePath = path.join(EXPORT_ROOT, fileName);
+      const filePath = path.join(outputDir, fileName);
       await fs.writeFile(filePath, content);
+      const downloadId = createDownloadId();
+      exportedFiles.set(downloadId, { filePath, fileName });
 
       res.json({
         success: true,
@@ -675,7 +745,8 @@ async function startServer(core, logger) {
           messageCount: countVisibleMessages(messages, filters),
           fileName,
           filePath,
-          downloadUrl: `/api/download?file=${encodeURIComponent(fileName)}`
+          outputDir,
+          downloadUrl: `/api/download?id=${encodeURIComponent(downloadId)}`
         }
       });
     } catch (error) {
@@ -686,21 +757,38 @@ async function startServer(core, logger) {
 
   async function handleDownload(req, res) {
     try {
-      const rawFileName = String(req.query.file || req.params.fileName || '');
-      const fileName = path.basename(rawFileName);
-      if (!fileName) {
-        return res.status(400).type('text/plain').send('Missing file name. Please export again from the page.');
+      const id = String(req.query.id || '');
+      let fileName = '';
+      let targetPath = '';
+
+      if (id && exportedFiles.has(id)) {
+        const item = exportedFiles.get(id);
+        fileName = item.fileName;
+        targetPath = item.filePath;
+      } else {
+        const rawFileName = String(req.query.file || req.params.fileName || '');
+        fileName = path.basename(rawFileName);
+        if (!fileName) {
+          return res.status(400).type('text/plain').send('Missing file name. Please export again from the page.');
+        }
+
+        const candidates = [
+          path.join(resolveOutputDir(req.query.dir), fileName),
+          path.join(DEFAULT_EXPORT_ROOT, fileName),
+          path.join(LEGACY_EXPORT_ROOT, fileName)
+        ];
+        for (const candidate of candidates) {
+          try {
+            await fs.access(candidate);
+            targetPath = candidate;
+            break;
+          } catch {
+            // Try next candidate.
+          }
+        }
       }
 
-      const exportRoot = path.resolve(EXPORT_ROOT);
-      const targetPath = path.resolve(exportRoot, fileName);
-      if (targetPath !== exportRoot && !targetPath.startsWith(exportRoot + path.sep)) {
-        return res.status(400).type('text/plain').send('Invalid file name.');
-      }
-
-      try {
-        await fs.access(targetPath);
-      } catch {
+      if (!targetPath) {
         return res.status(404).type('text/plain').send(`Export file not found: ${fileName}\nPlease export again from the page.`);
       }
 
@@ -747,5 +835,7 @@ export async function plugin_cleanup() {
   server = null;
   coreRef = null;
 }
+
+
 
 
