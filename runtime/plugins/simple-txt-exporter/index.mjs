@@ -167,8 +167,8 @@ function normalizeLogCommandText(text) {
 
 function getLogCommand(message) {
   const text = normalizeLogCommandText(messageText(message));
-  if (text === '.log new' || text === '.log on') return 'start';
-  if (text === '.log end' || text === '.log off') return 'end';
+  if (/^\.log\s+(new|on)(\s|$)/.test(text)) return 'start';
+  if (/^\.log\s+(end|off)(\s|$)/.test(text)) return 'end';
   return '';
 }
 
@@ -178,26 +178,29 @@ function isOutOfCharacterText(message) {
 }
 
 function annotateLogScenes(messages) {
-  let inside = false;
+  const insideByGroup = new Map();
   const annotated = [];
 
   for (const message of messages) {
+    const groupKey = String(message.__exportGroupCode || message.peerUid || 'default');
+    const inside = insideByGroup.get(groupKey) === true;
     const command = getLogCommand(message);
     if (command === 'start') {
-      if (!inside) inside = true;
+      if (!inside) insideByGroup.set(groupKey, true);
       continue;
     }
     if (command === 'end') {
-      if (inside) inside = false;
+      if (inside) insideByGroup.set(groupKey, false);
       continue;
     }
 
-    const isOoc = inside && isOutOfCharacterText(message);
+    const currentInside = insideByGroup.get(groupKey) === true;
+    const isOoc = currentInside && isOutOfCharacterText(message);
     annotated.push({
       ...message,
-      __logInsideSegment: inside,
+      __logInsideSegment: currentInside,
       __logOocByParen: isOoc,
-      __logScene: inside && !isOoc ? 'inside' : 'outside'
+      __logScene: currentInside && !isOoc ? 'inside' : 'outside'
     });
   }
 
@@ -238,6 +241,12 @@ function countVisibleMessages(messages, filters = normalizeFilters()) {
   return filterExportMessages(messages, filters).length;
 }
 
+function messageSceneType(message) {
+  if (message.__logInsideSegment && message.__logOocByParen) return '场内有括号';
+  if (message.__logInsideSegment) return '场内无括号';
+  return '场外消息';
+}
+
 function excelRows(messages, includeGroupCode = false, filters = normalizeFilters()) {
   return filterExportMessages(messages, filters)
     .map((message) => {
@@ -245,6 +254,7 @@ function excelRows(messages, includeGroupCode = false, filters = normalizeFilter
         formatDateTime(msgTimeMillis(message)),
         senderId(message),
         senderName(message),
+        messageSceneType(message),
         messageText(message)
       ];
       return includeGroupCode ? [message.__exportGroupCode || '', ...row] : row;
@@ -273,7 +283,9 @@ function columnName(index) {
 }
 
 function renderSheetXml(rows, includeGroupCode = false) {
-  const header = includeGroupCode ? ['群号', '时间', 'QQ号', '名字', '内容'] : ['时间', 'QQ号', '名字', '内容'];
+  const header = includeGroupCode
+    ? ['群号', '时间', 'QQ号', '名字', '消息类型', '内容']
+    : ['时间', 'QQ号', '名字', '消息类型', '内容'];
   const allRows = [header, ...rows];
   const rowXml = allRows.map((row, rowIndex) => {
     const rowNumber = rowIndex + 1;
@@ -294,7 +306,8 @@ function renderSheetXml(rows, includeGroupCode = false) {
     <col min="${includeGroupCode ? 2 : 1}" max="${includeGroupCode ? 2 : 1}" width="22" customWidth="1"/>
     <col min="${includeGroupCode ? 3 : 2}" max="${includeGroupCode ? 3 : 2}" width="16" customWidth="1"/>
     <col min="${includeGroupCode ? 4 : 3}" max="${includeGroupCode ? 4 : 3}" width="18" customWidth="1"/>
-    <col min="${includeGroupCode ? 5 : 4}" max="${includeGroupCode ? 5 : 4}" width="80" customWidth="1"/>
+    <col min="${includeGroupCode ? 5 : 4}" max="${includeGroupCode ? 5 : 4}" width="16" customWidth="1"/>
+    <col min="${includeGroupCode ? 6 : 5}" max="${includeGroupCode ? 6 : 5}" width="80" customWidth="1"/>
   </cols>
   <sheetData>${rowXml}</sheetData>
 </worksheet>`;
@@ -856,6 +869,9 @@ export async function plugin_cleanup() {
   server = null;
   coreRef = null;
 }
+
+
+
 
 
 
