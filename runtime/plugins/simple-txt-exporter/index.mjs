@@ -23,6 +23,7 @@ let loginStatusState = {
   detail: ''
 };
 const exportedFiles = new Map();
+const exportJobs = new Map();
 
 function createLogger(core) {
   const logger = core?.context?.logger;
@@ -234,6 +235,40 @@ function resolveOutputDir(input) {
 
 function createDownloadId() {
   return `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function withTimeout(promiseFactory, timeoutMs, timeoutMessage) {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(timeoutMessage)), timeoutMs);
+    Promise.resolve()
+      .then(promiseFactory)
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
+function clampPercent(value) {
+  return Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+}
+
+function updateExportJob(jobId, patch) {
+  const job = exportJobs.get(jobId);
+  if (!job) return;
+  exportJobs.set(jobId, {
+    ...job,
+    ...patch,
+    updatedAt: Date.now()
+  });
+}
+
+function getExportJob(jobId) {
+  return exportJobs.get(jobId) || null;
 }
 
 function safeFileName(input) {
@@ -649,7 +684,7 @@ async function listGroups(core) {
     .sort((a, b) => a.name.localeCompare(b.name, 'zh-Hans-CN'));
 }
 
-async function fetchGroupMessages(core, groupCode, options) {
+async function fetchGroupMessages(core, groupCode, options, onProgress, groupIndex, totalGroups) {
   const batchSize = Math.max(1, Math.min(Number(options.batchSize) || DEFAULT_BATCH_SIZE, MAX_BATCH_SIZE));
   const maxMessages = Math.max(1, Math.min(Number(options.maxMessages) || 50000, 500000));
   const startTime = parseDateMillis(options.startTime, 0);
@@ -658,11 +693,22 @@ async function fetchGroupMessages(core, groupCode, options) {
   const collected = [];
   let cursorMsgId = '';
   let done = false;
+  let batchIndex = 0;
+  const estimatedBatches = Math.max(1, Math.ceil(maxMessages / batchSize));
 
   while (!done && collected.length < maxMessages) {
-    const result = cursorMsgId
-      ? await core.apis.MsgApi.getMsgHistory(peer, cursorMsgId, batchSize, true)
-      : await core.apis.MsgApi.getAioFirstViewLatestMsgs(peer, batchSize);
+    batchIndex += 1;
+    const requestLabel = cursorMsgId ? `getMsgHistory(${groupCode}, ${cursorMsgId})` : `getAioFirstViewLatestMsgs(${groupCode})`;
+    console.log(`[SimpleTXT] 开始请求消息批次`, { groupCode, batchIndex, batchSize, cursorMsgId: cursorMsgId || null, requestLabel });
+    const requestFactory = () => (cursorMsgId
+      ? core.apis.MsgApi.getMsgHistory(peer, cursorMsgId, batchSize, true)
+      : core.apis.MsgApi.getAioFirstViewLatestMsgs(peer, batchSize));
+    const result = await withTimeout(
+      requestFactory,
+      20000,
+      `群聊 ${groupCode} 的消息接口在第 ${batchIndex} 批超时，可能是网络、权限或消息服务暂时无响应`
+    );
+    console.log(`[SimpleTXT] 消息批次返回`, { groupCode, batchIndex, batchLength: result?.msgList?.length || 0, cursorMsgId: cursorMsgId || null });
     const batch = result?.msgList || [];
     if (batch.length === 0) break;
 
@@ -678,6 +724,15 @@ async function fetchGroupMessages(core, groupCode, options) {
       if (msgTimeMillis(message) < msgTimeMillis(earliest)) {
         earliest = message;
       }
+    }
+
+    if (totalGroups && onProgress) {
+      const basePercent = ((groupIndex - 1) / totalGroups) * 100;
+      const batchPercent = (batchIndex / estimatedBatches) * (100 / totalGroups);
+      onProgress({
+        percent: clampPercent(basePercent + batchPercent),
+        detail: `正在读取群聊 ${groupCode}（第 ${batchIndex}/${estimatedBatches} 批）`
+      });
     }
 
     if (!earliest?.msgId || earliest.msgId === cursorMsgId) break;
@@ -703,13 +758,19 @@ function normalizeGroupCodes(body) {
   ));
 }
 
-async function fetchMergedGroupMessages(core, groupCodes, groups, options) {
+async function fetchMergedGroupMessages(core, groupCodes, groups, options, onProgress) {
   const merged = [];
   const groupMap = new Map(groups.map((group) => [group.groupCode, group]));
+  const totalGroups = Math.max(groupCodes.length, 1);
 
-  for (const groupCode of groupCodes) {
+  for (const [index, groupCode] of groupCodes.entries()) {
     const group = groupMap.get(groupCode) || { groupCode, name: `群聊 ${groupCode}` };
-    const messages = await fetchGroupMessages(core, groupCode, options);
+    console.log(`[SimpleTXT] 开始处理群聊`, { groupCode, groupName: group.name, index: index + 1, totalGroups });
+    onProgress?.({
+      percent: clampPercent((index / totalGroups) * 100),
+      detail: `正在读取 ${group.name}`
+    });
+    const messages = await fetchGroupMessages(core, groupCode, options, onProgress, index + 1, totalGroups);
     for (const message of messages) {
       merged.push({
         ...message,
@@ -718,6 +779,11 @@ async function fetchMergedGroupMessages(core, groupCodes, groups, options) {
       });
     }
   }
+
+  onProgress?.({
+    percent: 95,
+    detail: '正在整理导出内容'
+  });
 
   return merged.sort((a, b) => msgTimeMillis(a) - msgTimeMillis(b));
 }
@@ -797,8 +863,17 @@ function htmlPage() {
       </div>
       <label>登录状态</label>
       <div id="loginState" style="padding:10px 12px;border:1px solid #dfe3ea;border-radius:6px;background:#f8fafc;line-height:1.5;">正在获取状态...</div>
+      <div id="progressWrap" style="display:none;margin-top:16px;">
+        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:6px;">
+          <span id="progressLabel">准备开始</span>
+          <span id="progressPercent">0%</span>
+        </div>
+        <div style="width:100%;height:10px;border-radius:999px;background:#e9edf4;overflow:hidden;">
+          <div id="progressBar" style="width:0%;height:100%;background:#1f6feb;transition:width .2s ease;"></div>
+        </div>
+      </div>
       <button id="export">导出</button>
-      <div id="status"></div>
+      <div id="status" style="margin-top:14px;white-space:pre-wrap;line-height:1.5;"></div>
     </section>
   </main>
   <script>
@@ -807,7 +882,13 @@ function htmlPage() {
     const statusEl = document.getElementById('status');
     const buttonEl = document.getElementById('export');
     const loginStateEl = document.getElementById('loginState');
+    const progressWrapEl = document.getElementById('progressWrap');
+    const progressLabelEl = document.getElementById('progressLabel');
+    const progressPercentEl = document.getElementById('progressPercent');
+    const progressBarEl = document.getElementById('progressBar');
     let allGroups = [];
+    let exportPollTimer = null;
+    let currentJobId = '';
 
     async function api(path, options) {
       const res = await fetch(path, options);
@@ -824,6 +905,57 @@ function htmlPage() {
       const statusText = state.isOnline ? '在线' : (state.isInvalid ? '登录失效 / 已离线' : '离线');
       const detailText = state.detail ? '<br>' + state.detail : '';
       loginStateEl.innerHTML = '<strong>' + statusText + '</strong><br>' + state.label + detailText;
+    }
+
+    function setExportProgress({ visible, label, percent, message, isError }) {
+      if (visible) {
+        progressWrapEl.style.display = 'block';
+      } else {
+        progressWrapEl.style.display = 'none';
+      }
+      if (label !== undefined) progressLabelEl.textContent = label;
+      if (percent !== undefined) {
+        progressPercentEl.textContent = percent + '%';
+        progressBarEl.style.width = percent + '%';
+      }
+      if (message !== undefined) {
+        statusEl.innerHTML = isError ? '<span style="color:#c62828;">' + message + '</span>' : message;
+      }
+    }
+
+    function stopExportPolling() {
+      if (exportPollTimer) {
+        clearTimeout(exportPollTimer);
+        exportPollTimer = null;
+      }
+    }
+
+    async function pollExportStatus(jobId) {
+      if (!jobId) return;
+      try {
+        const job = await api('/api/export/status/' + encodeURIComponent(jobId));
+        if (job?.status === 'done') {
+          stopExportPolling();
+          setExportProgress({ visible: false, message: '导出完成：' + job.messageCount + ' 条消息<br><a href="' + job.downloadUrl + '">打开导出文件</a><br>保存位置：' + job.filePath, percent: 100 });
+          buttonEl.disabled = false;
+          currentJobId = '';
+          return;
+        }
+        if (job?.status === 'error') {
+          stopExportPolling();
+          setExportProgress({ visible: true, label: '导出失败', percent: job.percent || 0, message: job.error || '导出失败', isError: true });
+          buttonEl.disabled = false;
+          currentJobId = '';
+          return;
+        }
+        setExportProgress({ visible: true, label: job?.message || '正在导出', percent: job?.percent || 0, message: job?.detail || '正在导出，请稍候…' });
+        exportPollTimer = setTimeout(() => pollExportStatus(jobId), 1000);
+      } catch (error) {
+        stopExportPolling();
+        setExportProgress({ visible: true, label: '状态获取失败', percent: 0, message: error.message, isError: true });
+        buttonEl.disabled = false;
+        currentJobId = '';
+      }
     }
 
     async function refreshLoginState() {
@@ -895,8 +1027,9 @@ function htmlPage() {
     groupSearchEl.addEventListener('input', filterGroups);
 
     buttonEl.addEventListener('click', async () => {
+      stopExportPolling();
       buttonEl.disabled = true;
-      statusEl.textContent = '正在导出，历史消息多时需要等一会儿...';
+      setExportProgress({ visible: true, label: '准备开始', percent: 0, message: '正在提交导出任务…' });
       try {
         const groupCodes = resolveGroupCodes();
         if (groupCodes.length === 0) throw new Error('请选择至少一个群聊，或输入完整群号');
@@ -917,10 +1050,12 @@ function htmlPage() {
             removeFile: document.getElementById('removeFile').checked
           })
         });
-        statusEl.innerHTML = '导出完成：' + data.messageCount + ' 条消息<br><a href="' + data.downloadUrl + '">打开导出文件</a><br>保存位置：' + data.filePath;
+        currentJobId = data.jobId || '';
+        if (!currentJobId) throw new Error('导出任务未返回任务编号');
+        setExportProgress({ visible: true, label: '已加入队列', percent: 0, message: '导出已经开始，正在读取消息…' });
+        pollExportStatus(currentJobId);
       } catch (error) {
-        statusEl.textContent = error.message;
-      } finally {
+        setExportProgress({ visible: true, label: '导出失败', percent: 0, message: error.message, isError: true });
         buttonEl.disabled = false;
       }
     });
@@ -964,38 +1099,99 @@ async function startServer(core, logger) {
         return res.status(400).json({ success: false, error: '请选择至少一个群聊' });
       }
 
-      const groups = await listGroups(core);
-      const messages = await fetchMergedGroupMessages(core, groupCodes, groups, req.body || {});
-      const format = req.body?.format === 'xlsx' ? 'xlsx' : 'txt';
-      const filters = normalizeFilters(req.body || {});
-      const isMultiGroup = groupCodes.length > 1;
-      const content = format === 'xlsx'
-        ? renderXlsx(messages, isMultiGroup, filters)
-        : renderTxt({ groupCode: groupCodes.join('_'), name: isMultiGroup ? '多群合并' : `群聊 ${groupCodes[0]}` }, messages, filters);
-      const outputDir = resolveOutputDir(req.body?.outputDir);
-      await fs.mkdir(outputDir, { recursive: true });
+      const jobId = createDownloadId();
+      exportJobs.set(jobId, {
+        id: jobId,
+        status: 'queued',
+        percent: 0,
+        message: '已加入导出队列',
+        detail: '正在准备导出任务…',
+        error: '',
+        filePath: '',
+        fileName: '',
+        downloadUrl: '',
+        messageCount: 0,
+        createdAt: Date.now()
+      });
 
-      const exportName = isMultiGroup ? `多群合并_${groupCodes.length}群` : `${safeFileName((groups.find((item) => item.groupCode === groupCodes[0]) || {}).name || '群聊')}_${groupCodes[0]}`;
-      const fileName = `${safeFileName(exportName)}_${Date.now()}.${format}`;
-      const filePath = path.join(outputDir, fileName);
-      await fs.writeFile(filePath, content);
-      const downloadId = createDownloadId();
-      exportedFiles.set(downloadId, { filePath, fileName });
+      (async () => {
+        try {
+          console.log(`[SimpleTXT] 导出任务开始`, { jobId, groupCodes });
+          updateExportJob(jobId, { status: 'running', percent: 1, message: '开始导出', detail: '正在读取群聊列表…' });
+          const groups = await listGroups(core);
+          console.log(`[SimpleTXT] 群列表读取完成`, { jobId, groupCount: groups.length });
+          const messages = await fetchMergedGroupMessages(core, groupCodes, groups, req.body || {}, (state) => {
+            updateExportJob(jobId, {
+              status: 'running',
+              percent: state.percent || 0,
+              message: state.detail || '正在导出',
+              detail: state.detail || '正在导出'
+            });
+          });
+          const format = req.body?.format === 'xlsx' ? 'xlsx' : 'txt';
+          const filters = normalizeFilters(req.body || {});
+          const isMultiGroup = groupCodes.length > 1;
+          const content = format === 'xlsx'
+            ? renderXlsx(messages, isMultiGroup, filters)
+            : renderTxt({ groupCode: groupCodes.join('_'), name: isMultiGroup ? '多群合并' : `群聊 ${groupCodes[0]}` }, messages, filters);
+          const outputDir = resolveOutputDir(req.body?.outputDir);
+          console.log(`[SimpleTXT] 写出文件`, { jobId, outputDir, format, messageCount: countVisibleMessages(messages, filters) });
+          await fs.mkdir(outputDir, { recursive: true });
+
+          const exportName = isMultiGroup ? `多群合并_${groupCodes.length}群` : `${safeFileName((groups.find((item) => item.groupCode === groupCodes[0]) || {}).name || '群聊')}_${groupCodes[0]}`;
+          const fileName = `${safeFileName(exportName)}_${Date.now()}.${format}`;
+          const filePath = path.join(outputDir, fileName);
+          await fs.writeFile(filePath, content);
+          const downloadId = createDownloadId();
+          exportedFiles.set(downloadId, { filePath, fileName });
+          const messageCount = countVisibleMessages(messages, filters);
+
+          console.log(`[SimpleTXT] 导出任务完成`, { jobId, fileName, filePath, messageCount });
+          updateExportJob(jobId, {
+            status: 'done',
+            percent: 100,
+            message: '导出完成',
+            detail: `已导出 ${messageCount} 条消息`,
+            error: '',
+            filePath,
+            fileName,
+            downloadUrl: `/api/download?id=${encodeURIComponent(downloadId)}`,
+            messageCount
+          });
+        } catch (error) {
+          logger.error('导出失败:', error);
+          console.error(`[SimpleTXT] 导出任务失败`, { jobId, error: error?.message || String(error) });
+          updateExportJob(jobId, {
+            status: 'error',
+            percent: 0,
+            message: '导出失败',
+            detail: error?.message || String(error),
+            error: error?.message || String(error)
+          });
+        }
+      })();
 
       res.json({
         success: true,
         data: {
-          messageCount: countVisibleMessages(messages, filters),
-          fileName,
-          filePath,
-          outputDir,
-          downloadUrl: `/api/download?id=${encodeURIComponent(downloadId)}`
+          jobId,
+          status: 'queued',
+          message: '导出已开始',
+          percent: 0
         }
       });
     } catch (error) {
-      logger.error('导出失败:', error);
+      logger.error('提交导出失败:', error);
       res.status(500).json({ success: false, error: error?.message || String(error) });
     }
+  });
+
+  app.get('/api/export/status/:jobId', (req, res) => {
+    const job = getExportJob(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ success: false, error: '导出任务不存在' });
+    }
+    res.json({ success: true, data: job });
   });
 
   async function handleDownload(req, res) {

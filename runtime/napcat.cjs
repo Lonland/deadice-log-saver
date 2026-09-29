@@ -1,6 +1,7 @@
 const process = require('process');
 const os = require('os');
 const path = require('path');
+const { pathToFileURL } = require('url');
 
 // 保存原始dlopen
 const dlopenOrig = process.dlopen;
@@ -50,7 +51,8 @@ async function initializeNapCat () {
   console.log('[NapCat] [Info] 开始初始化NapCat');
   try {
     const currentPath = path.dirname(__filename);
-    const { NCoreInitFramework, getWebUiUrl } = await import('file://' + path.join(currentPath, './napcat.mjs'));
+    const moduleUrl = pathToFileURL(path.join(currentPath, './napcat.mjs')).href;
+    const { NCoreInitFramework, getWebUiUrl } = await import(moduleUrl);
     getWebUiUrlFunc = getWebUiUrl;
     await NCoreInitFramework(wrapperSession, wrapperLoginService, (callback) => { ncCallback = callback; });
   } catch (error) {

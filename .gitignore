@@ -16,3 +16,6 @@ Thumbs.db
 *.tmp
 *.bak
 
+# Built installer packages
+dist/
+
