@@ -1,9 +1,32 @@
 import hashlib
 from pathlib import Path
 
+from docx_reader import parse_docx
 from log_parser import decode_bytes, parse_text
 
 UNGROUPED_CAMPAIGN = '未分组'
+LOG_SUFFIXES = ('.txt', '.docx')
+
+
+def _log_files(logs_dir: Path):
+    """返回 (团名, 文件) 列表。子文件夹为团，根目录文件归入“未分组”；忽略 Word 临时文件。"""
+    files = []
+    for entry in sorted(logs_dir.iterdir()):
+        if entry.is_dir():
+            files.extend((entry.name, f) for f in sorted(entry.iterdir()) if _is_log(f))
+        elif _is_log(entry):
+            files.append((UNGROUPED_CAMPAIGN, entry))
+    return files
+
+
+def _is_log(path: Path) -> bool:
+    return path.is_file() and path.suffix.lower() in LOG_SUFFIXES and not path.name.startswith('~$')
+
+
+def _parse(path: Path, data: bytes) -> dict:
+    if path.suffix.lower() == '.docx':
+        return parse_docx(path)
+    return parse_text(decode_bytes(data))
 
 
 def _campaign_id(conn, name: str) -> int:
@@ -42,17 +65,12 @@ def _write_parsed(conn, document_id: int, parsed: dict) -> None:
 
 
 def scan_logs(conn, logs_dir: Path) -> dict:
-    """扫描 logs/<团名>/*.txt（根目录的 txt 归入“未分组”），按文件内容 hash 增量导入。"""
+    """扫描 logs/<团名>/ 下的 txt/docx（根目录的文件归入“未分组”），按文件内容 hash 增量导入。"""
     stats = {'added': 0, 'updated': 0, 'unchanged': 0, 'missing': 0, 'errors': []}
     logs_dir = Path(logs_dir)
     logs_dir.mkdir(parents=True, exist_ok=True)
 
-    files = []
-    for entry in sorted(logs_dir.iterdir()):
-        if entry.is_dir():
-            files.extend((entry.name, f) for f in sorted(entry.glob('*.txt')))
-        elif entry.is_file() and entry.suffix.lower() == '.txt':
-            files.append((UNGROUPED_CAMPAIGN, entry))
+    files = _log_files(logs_dir)
 
     seen_keys = set()
     for campaign_name, path in files:
@@ -70,7 +88,7 @@ def scan_logs(conn, logs_dir: Path) -> dict:
                 stats['unchanged'] += 1
                 continue
 
-            parsed = parse_text(decode_bytes(data))
+            parsed = _parse(path, data)
             campaign_id = _campaign_id(conn, campaign_name)
             if row:
                 _clear_document(conn, row['id'])

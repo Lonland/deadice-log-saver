@@ -25,6 +25,19 @@ pip install -r requirements.txt
 
 章节：日志中单独一行形如 `第一章 雨夜`、`第3幕` 的内容会被识别为章节标题（规则见 [log_parser.py](./log_parser.py) 中的 `CHAPTER_RE`）。没有章节标题的文档只有一个“全文”章节。
 
+支持的文件格式：
+
+- `.txt`：QQ跑团Log导出器导出的格式（`名字(QQ号) 时间` + 内容）。
+- `.docx`：支持以下写法（均没有时间和 QQ 号，默认视为场内，只有以 `(` 或 `（` 开头的内容标为场外）
+  - 段落：同上面的 TXT 格式。
+  - 段落标记：`<角色名> 内容`，例如 `<kp> 你们来到旅馆。`，`<kp>` 会统一显示为 `KP`。没有标记的段落视为上一位角色的续写。
+  - 章节：独立的 `【章节名】` 段落作为章节；`——————` 之类的分隔行作为 `第N段` 章节（仅在其后有消息时生成）。
+  - 表格：每行两列，左列为角色名，右列为 RP。第一行若为“角色 / RP”表头会自动跳过。
+  - `.log on/off` 等控制指令在 docx 中会被忽略，不改变场内/场外状态。
+  - 骰子机器人的固定签名句会被自动去掉。
+- 不支持旧版 `.doc`，请另存为 `.docx`。
+- 以 `~$` 开头的 Word 临时文件会被忽略。
+
 ## 启动
 
 ```powershell
@@ -54,6 +67,7 @@ python -m unittest tests.test_log_parser -v
 
 - `app.py`：Flask 应用与 API。
 - `log_parser.py`：TXT 解析。
+- `docx_reader.py`：Word（.docx）读取，支持表格与段落两种写法。
 - `importer.py`：扫描 `logs/` 并增量导入。
 - `db.py`：SQLite 表结构与连接。
 - `templates/index.html`、`static/`：页面。

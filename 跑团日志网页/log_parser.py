@@ -34,6 +34,8 @@ def decode_bytes(data: bytes) -> str:
 
 
 def mask_qq(qq: str) -> str:
+    if not qq:
+        return ''
     if len(qq) <= 4:
         return '*' * len(qq)
     return qq[:2] + '*' * (len(qq) - 4) + qq[-2:]
@@ -84,9 +86,14 @@ def parse_text(text: str) -> dict:
                 body.append(line)
         events.append(('msg', speaker, qq, sent_at, body))
 
+    return build_result(events)
+
+
+def build_result(events, default_scene_on=False) -> dict:
+    """events 为 ('chapter', 标题) 或 ('msg', 角色, QQ或None, 时间或None, 行列表)。"""
     titles = [DEFAULT_CHAPTER_TITLE]
     raw_messages = []
-    scene_on = False
+    scene_on = default_scene_on
     for event in events:
         if event[0] == 'chapter':
             titles.append(event[1])

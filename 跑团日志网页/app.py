@@ -35,6 +35,15 @@ def _message_where(args, document_id: int):
     return ' AND '.join(where), params
 
 
+def _message_header(row) -> str:
+    head = row['speaker']
+    if row['qq_masked']:
+        head += f"({row['qq_masked']})"
+    if row['sent_at']:
+        head += f" {row['sent_at']}"
+    return head
+
+
 def _export_text(doc, rows, fmt: str) -> str:
     lines = []
     if fmt == 'md':
@@ -53,7 +62,7 @@ def _export_text(doc, rows, fmt: str) -> str:
             lines.append(f'## {current_chapter}' if fmt == 'md' else f'=== {current_chapter} ===')
             lines.append('')
         tag = ' [场外]' if row['msg_type'] == 'ooc' else ''
-        header = f"{row['speaker']}({row['qq_masked']}) {row['sent_at']}{tag}"
+        header = _message_header(row) + tag
         lines.append(f'**{header}**' if fmt == 'md' else header)
         lines.append(row['content'])
         lines.append('')

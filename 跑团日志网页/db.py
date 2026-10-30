@@ -27,8 +27,8 @@ CREATE TABLE IF NOT EXISTS messages (
     chapter_id INTEGER NOT NULL REFERENCES chapters(id),
     seq INTEGER NOT NULL,
     speaker TEXT NOT NULL,
-    qq_masked TEXT NOT NULL,
-    sent_at TEXT NOT NULL,
+    qq_masked TEXT,
+    sent_at TEXT,
     msg_type TEXT NOT NULL CHECK (msg_type IN ('rp', 'ooc')),
     content TEXT NOT NULL
 );
@@ -46,9 +46,20 @@ def connect(db_path) -> sqlite3.Connection:
     return conn
 
 
+def _has_legacy_schema(conn) -> bool:
+    cols = {row['name']: row for row in conn.execute('PRAGMA table_info(messages)')}
+    return bool(cols) and bool(cols['sent_at']['notnull'] or cols['qq_masked']['notnull'])
+
+
 def init_db(db_path) -> None:
     conn = connect(db_path)
     try:
+        if _has_legacy_schema(conn):
+            # 旧表结构要求时间和 QQ 非空。数据均来自源文件，清空后 rescan 会重新导入。
+            conn.executescript(
+                'DROP TABLE IF EXISTS messages; DROP TABLE IF EXISTS chapters; '
+                'DROP TABLE IF EXISTS documents; DROP TABLE IF EXISTS campaigns;'
+            )
         conn.executescript(SCHEMA)
         conn.commit()
     finally:

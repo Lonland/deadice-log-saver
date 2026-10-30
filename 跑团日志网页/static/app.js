@@ -188,8 +188,8 @@
       const node = el('div', `msg ${m.msg_type}`);
       const head = el('div', 'msg-head');
       head.append(el('span', 'msg-speaker', m.speaker));
-      head.append(el('span', 'msg-qq', `(${m.qq_masked})`));
-      head.append(el('span', 'msg-time', m.sent_at));
+      if (m.qq_masked) head.append(el('span', 'msg-qq', `(${m.qq_masked})`));
+      if (m.sent_at) head.append(el('span', 'msg-time', m.sent_at));
       if (m.msg_type === 'ooc') head.append(el('span', 'msg-tag', '场外'));
       node.append(head);
       node.append(el('div', 'msg-body', m.content));
