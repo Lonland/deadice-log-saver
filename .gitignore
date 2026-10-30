@@ -6,6 +6,12 @@ runtime/cache/
 runtime/logs/
 runtime/config/
 
+# Personal TRPG logs and generated database for the log website
+跑团日志网页/logs/
+跑团日志网页/data/
+跑团日志网页/__pycache__/
+跑团日志网页/tests/__pycache__/
+
 # Editor and OS metadata
 .vscode/
 .DS_Store

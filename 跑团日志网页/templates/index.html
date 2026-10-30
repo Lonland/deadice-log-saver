@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>跑团日志</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="topbar">
+    <h1>跑团日志</h1>
+    <button id="rescan-btn" type="button">重新扫描</button>
+    <span id="status" class="status"></span>
+  </header>
+
+  <div class="layout">
+    <aside class="sidebar">
+      <div id="tree"></div>
+    </aside>
+
+    <main class="content">
+      <div id="empty" class="empty">从左侧选择一篇日志</div>
+
+      <div id="viewer" hidden>
+        <div class="doc-head">
+          <h2 id="doc-title"></h2>
+          <div class="muted" id="doc-meta"></div>
+        </div>
+
+        <div class="toolbar">
+          <label>章节
+            <select id="chapter-select"></select>
+          </label>
+          <label>类型
+            <select id="type-select">
+              <option value="all">全部</option>
+              <option value="rp">场内 / RP</option>
+              <option value="ooc">场外</option>
+            </select>
+          </label>
+          <label>角色
+            <select id="speaker-select"><option value="">全部角色</option></select>
+          </label>
+          <label>搜索
+            <input id="search-input" type="search" placeholder="关键词">
+          </label>
+          <label class="check"><input id="time-toggle" type="checkbox" checked> 显示时间</label>
+          <label>导出
+            <select id="export-format">
+              <option value="txt">TXT</option>
+              <option value="md">Markdown</option>
+            </select>
+          </label>
+          <button id="export-btn" type="button">导出当前结果</button>
+        </div>
+
+        <div id="messages" class="messages"></div>
+        <div class="more">
+          <span id="count" class="muted"></span>
+          <button id="more-btn" type="button" hidden>加载更多</button>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
